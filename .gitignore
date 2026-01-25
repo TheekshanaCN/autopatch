@@ -1,0 +1,32 @@
+# OS / Editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Logs
+*.log
+logs/
+tmp/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Build / cache
+dist/
+build/
+.cache/
+coverage/
+
+# Docker
+docker-data/
+*.tar
+
+# Job workspaces (runtime data)
+.tmp/
+jobs/
+workspace/
