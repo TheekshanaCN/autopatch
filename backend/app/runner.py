@@ -40,14 +40,15 @@ def detect_pkg_manager(repo_dir: Path) -> str:
 
 
 def docker_build_repo(
-    job_id: str,
-    repo_dir: Path,
-    image: str = "autopatch-runner:latest",
+    job_id: str, repo_dir: Path, image: str | None = None
 ) -> Tuple[int, str]:
     """
     Runs npm/pnpm/yarn install + build inside Docker, mounting repo_dir to /workspace.
     Returns (exit_code, pkg_manager).
     """
+
+    if image is None:
+        image = os.environ.get("RUNNER_IMAGE", "autopatch-runner:latest")
 
     pkg = detect_pkg_manager(repo_dir)
 
