@@ -2,11 +2,13 @@ import subprocess
 import uuid
 import json
 from pathlib import Path
+import yaml
 
 from .storage import append_log, init_job, write_status, get_job_paths
 from .runner import docker_build_repo, run_cmd
 from .scanner import scan_repo
 from .context_compiler import compile_ai_context
+from .patcher import generate_patch_diff, apply_patch
 
 
 def clone_repo(job_id: str, repo_url: str, repo_dir: Path) -> int:
@@ -20,14 +22,14 @@ def clone_repo(job_id: str, repo_url: str, repo_dir: Path) -> int:
 def run_job(job_id: str, repo_url: str) -> None:
     paths = get_job_paths(job_id)
 
-    #CLONING
+    # CLONING
     write_status(job_id, state="RUNNING", step="CLONING", message="Cloning repo")
     rc = clone_repo(job_id, repo_url, paths.repo_dir)
     if rc != 0:
         write_status(job_id, state="FAILED", step="CLONING", message="Git clone failed")
         return
 
-    #DETECTING
+    # DETECTING
     # Create .ai folder for artifacts
     ai_dir = paths.job_dir / ".ai"
     ai_dir.mkdir(parents=True, exist_ok=True)
@@ -36,21 +38,89 @@ def run_job(job_id: str, repo_url: str) -> None:
     scan = scan_repo(job_id, paths.repo_dir)
     (ai_dir / "scan.json").write_text(json.dumps(scan, indent=2), encoding="utf-8")
 
-    #COMPILING
-    write_status(job_id, state="RUNNING", step="COMPILING", message="Generating ai.project.yml via Gemini")
+    # COMPILING
+    write_status(
+        job_id,
+        state="RUNNING",
+        step="COMPILING",
+        message="Generating ai.project.yml via Gemini",
+    )
     try:
         compile_ai_context(job_id, paths.job_dir, paths.repo_dir)
     except Exception as e:
         append_log(job_id, f"[ai] compile failed: {e}")
         # keep going without Gemini for now, but mark it
-        write_status(job_id, state="RUNNING", step="COMPILING", message="Gemini compile failed, continuing to build")
+        write_status(
+            job_id,
+            state="RUNNING",
+            step="COMPILING",
+            message="Gemini compile failed, continuing to build",
+        )
 
-    #BUILDING
-    write_status(job_id, state="RUNNING", step="BUILDING", message="Running install+build in Docker")
-    exit_code, pkg = docker_build_repo(job_id, paths.repo_dir)
-    append_log(job_id, f"[info] package_manager={pkg}")
+    # BUILDING + PATCHING LOOP
+    max_loops = 3
+    ai_project_path = paths.job_dir / ".ai" / "ai.project.yml"
+    if ai_project_path.exists():
+        try:
+            ai_project = (
+                yaml.safe_load(ai_project_path.read_text(encoding="utf-8")) or {}
+            )
+            max_loops = int(ai_project.get("limits", {}).get("max_patch_loops", 3))
+        except Exception:
+            max_loops = 3
 
-    if exit_code == 0:
-        write_status(job_id, state="SUCCESS", step="DONE", message="Build succeeded")
-    else:
-        write_status(job_id, state="FAILED", step="DONE", message="Build failed (see logs)")
+    attempt = 0 
+
+    while True:
+        attempt += 1
+        write_status(
+            job_id,
+            state="RUNNING",
+            step="BUILDING",
+            message=f"Build attempt {attempt} (install+build in Docker)",
+        )
+
+        exit_code, pkg = docker_build_repo(job_id, paths.repo_dir)
+        append_log(job_id, f"[info] package_manager={pkg}")
+
+        if exit_code == 0:
+            write_status(
+                job_id, state="SUCCESS", step="DONE", message="Build succeeded"
+            )
+            return 
+
+        # If we already used all patch loops, stop
+        patch_index = attempt  # attempt 1 failed -> patch #1
+        if patch_index > max_loops:
+            write_status(
+                job_id,
+                state="FAILED",
+                step="DONE",
+                message="Build failed after max patch loops",
+            )
+            return
+
+        # Generate + apply patch
+        write_status(
+            job_id,
+            state="RUNNING",
+            step="PATCHING",
+            message=f"Generating/applying patch #{patch_index}",
+        )
+
+        diff = generate_patch_diff(job_id, paths.repo_dir, paths.job_dir / ".ai")
+
+        applied = apply_patch(
+            job_id, paths.repo_dir, paths.job_dir / ".ai", diff, patch_index
+        )
+
+        if not applied:
+            write_status(
+                job_id,
+                state="FAILED",
+                step="DONE",
+                message="Patch not applicable or needs env (see logs)",
+            )
+            return
+
+        # loop continues → rerun build
