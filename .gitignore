@@ -28,5 +28,4 @@ docker-data/
 
 # Job workspaces (runtime data)
 .tmp/
-jobs/
 workspace/
